@@ -33,5 +33,5 @@ public enum ShrinkItThreadFormat : ushort
     /// <summary>
     /// Unix 16-bit compress format.
     /// </summary>
-    Unit16BitCompress = 0x0005,
+    Unix16BitCompress = 0x0005,
 }

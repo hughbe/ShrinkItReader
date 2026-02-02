@@ -5,11 +5,11 @@ A lightweight .NET library for reading ShrinkIt (NuFX) archive files (.shk, .sdk
 ## Features
 
 - Read ShrinkIt/NuFX archives (.shk, .sdk, .bxy files)
+- Automatic detection and handling of Binary II wrapped archives
 - Parse Master Header Block and archive entries
 - Support for multiple compression formats:
   - Uncompressed
-  - Dynamic LZW (ShrinkIt-specific)
-  - Huffman Squeeze
+  - Dynamic LZW/1 and LZW/2 (ShrinkIt-specific)
 - Extract data forks, resource forks, and disk images
 - Preserve file metadata (file types, dates, access flags)
 - Support for multiple file systems:
@@ -129,6 +129,7 @@ foreach (var entry in archive.Entries)
 The main class for reading ShrinkIt/NuFX archives.
 
 - `ShrinkItArchive(Stream stream)` - Opens an archive from a stream
+- `BinaryIIHeader` - Gets the Binary II header if the archive was wrapped (nullable)
 - `MasterHeaderBlock` - Gets the Master Header Block with archive metadata
 - `Entries` - Gets the list of archive entries
 - `GetFileName(ShrinkItArchiveEntry)` - Gets the file name for an entry
@@ -162,13 +163,19 @@ Represents a single entry in the archive:
 Contains file-level metadata:
 
 - `FileSystemId` - Native file system (ProDOS, DOS 3.3, HFS, etc.)
-- `FileType` - File type code
-- `AuxType` - Auxiliary type code
-- `StorageType` - Storage type or block size
+- `FileType` - File type code (32-bit)
+- `AuxType` - Auxiliary type code (32-bit)
+- `StorageTypeOrBlockSize` - Raw storage type/block size value
+- `StorageType` - Storage type (derived from low byte)
+- `BlockSize` - Block size for disks (same as StorageTypeOrBlockSize)
 - `AccessFlags` - File permissions (read, write, delete, etc.)
 - `CreationDate` - File creation date
 - `LastModificationDate` - File modification date
 - `ArchiveDate` - When the file was added to the archive
+- `FileSystemInfo` - File system separator character info
+- `VersionNumber` - Record version number
+- `AttributesCount` - Length of attribute section
+- `TotalThreads` - Number of threads in this record
 
 ### ShrinkItThread
 
@@ -181,15 +188,45 @@ Describes a data thread within an entry:
 - `CompressedDataSize` - Size after compression
 - `Crc` - CRC-16 checksum
 
+### BinaryIIHeader
+
+Contains Binary II wrapper metadata (present when archive is wrapped in Binary II format):
+
+- `Version` - Binary II format version (0 or 1)
+- `FileName` - Name of the wrapped file (max 64 characters)
+- `FileType` - ProDOS file type
+- `AuxType` - ProDOS auxiliary type
+- `Access` - ProDOS access flags
+- `StorageType` - ProDOS storage type
+- `FileLength` - Length of the wrapped file in bytes
+- `SizeInBlocks` - Size of file in 512-byte blocks
+- `CreationDate` / `CreationTime` - File creation timestamp (ProDOS format)
+- `ModificationDate` / `ModificationTime` - File modification timestamp (ProDOS format)
+- `FilesToFollow` - Number of files to follow in archive
+- `DiskSpaceNeeded` - Total disk space needed for all files
+- `OperatingSystemType` - OS type identifier
+- `NativeFileType` - Native file type (16-bit)
+- `PhantomFileFlag` - Phantom file indicator
+- `DataFlags` - Data flags (compressed/encrypted/sparse)
+- `TotalEntrySize` - Total size including header and padded data
+
+GS/OS extended attributes:
+- `GsosAuxTypeHigh` - GS/OS auxiliary type high word
+- `GsosAccessHigh` - GS/OS access high byte
+- `GsosFileTypeHigh` - GS/OS file type high byte
+- `GsosStorageTypeHigh` - GS/OS storage type high byte
+- `GsosSizeInBlocksHigh` - GS/OS file size in blocks high word
+- `GsosEofHigh` - GS/OS EOF high byte
+
 ### Enumerations
 
 #### ShrinkItThreadFormat
-- `Uncompressed` - No compression
-- `HuffmanSqueeze` - Huffman compression
-- `DynamicLzw1` - Dynamic LZW (ShrinkIt-specific)
-- `DynamicLzw2` - Dynamic LZW variant
-- `Unix12BitCompress` - Unix compress (12-bit)
-- `Unix16BitCompress` - Unix compress (16-bit)
+- `Uncompressed` - No compression ✓
+- `DynamicLzw1` - Dynamic LZW/1 (ShrinkIt-specific) ✓
+- `DynamicLzw2` - Dynamic LZW/2 (ShrinkIt-specific) ✓
+- `HuffmanSqueeze` - Huffman compression (not yet supported)
+- `Unix12BitCompress` - Unix compress 12-bit (not yet supported)
+- `Unix16BitCompress` - Unix compress 16-bit (not yet supported)
 
 #### ShrinkItFileSystem
 - `ProDOS_SOS` - ProDOS/SOS
@@ -265,12 +302,30 @@ Total Records: 9
 Output Directory: /path/to/extracted_files
 
 Extracting: File.Nav.System
-  Data fork: /path/to/extracted_files/File.Nav.System (8.06 KB)
+  File System: ProDOS_SOS
+  Type: 0xB3  Aux: 0x0000  Storage: Standard3
+  Created: 1992-03-15 14:30  Modified: 1992-03-15 14:30
+  Data fork: /path/to/extracted_files/File.Nav.System (8.06 KB) [DynamicLzw2, 45.2% saved]
 Extracting: File.Nav.Manual
-  Data fork: /path/to/extracted_files/File.Nav.Manual (6.01 KB)
+  File System: ProDOS_SOS
+  Type: 0x04  Aux: 0x0000  Storage: Standard2
+  Created: 1992-03-10 09:15  Modified: 1992-03-10 09:15
+  Data fork: /path/to/extracted_files/File.Nav.Manual (6.01 KB) [DynamicLzw2, 38.7% saved]
 ...
 
 Extraction complete: /path/to/extracted_files
+```
+
+For Binary II wrapped archives (.bxy), additional header information is displayed:
+```
+Archive: archive.bxy
+Binary II Wrapper: Yes (version 1)
+  Wrapped File: archive.shk
+  File Type: 0xE0
+  Aux Type: 0x8002
+Total Records: 11
+Output Directory: /path/to/extracted_files
+...
 ```
 
 ## Requirements
@@ -303,7 +358,10 @@ ShrinkIt was created by Andy Nicholas in 1986 and became the de facto standard f
 **File Extensions:**
 - `.shk` - ShrinkIt archive
 - `.sdk` - ShrinkIt disk image archive
-- `.bxy` - Binary II with ShrinkIt compression
+- `.bxy` - Binary II wrapped ShrinkIt archive
+
+**Binary II Format:**
+Binary II is a wrapper format developed by Gary B. Little to preserve ProDOS file attributes during file transfers. When ShrinkIt archives are wrapped in Binary II, they use the `.bxy` extension. This library automatically detects and unwraps Binary II headers, providing seamless access to the contained ShrinkIt archive.
 
 ## Related Projects
 
@@ -320,5 +378,6 @@ ShrinkIt was created by Andy Nicholas in 1986 and became the de facto standard f
 ## Documentation
 
 - [NuFX Archive Format Specification](https://nulib.com/library/FTN.e08002.htm)
+- [Binary II Format Specification](https://ciderpress2.com/formatdoc/Binary2-notes.html)
 - [ShrinkIt History and Documentation](https://en.wikipedia.org/wiki/ShrinkIt)
 - [Apple II File Type Notes](https://www.apple2.org.za/gswv/a2zine/faqs/Csa2KFAQ.html)

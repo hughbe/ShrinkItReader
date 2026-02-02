@@ -13,7 +13,7 @@
     <Version>1.0.0</Version>
     <Authors>Hugh Bellamy</Authors>
     <Description>A lightweight .NET library for reading ShrinkIt (NuFX) archive files (.shk, .sdk, .bxy). Supports multiple compression formats (Dynamic LZW, Huffman Squeeze), extracting data forks, resource forks, and disk images, with metadata preservation across multiple Apple II file systems.</Description>
-    <PackageTags>shrinkit;nufx;apple-ii;archive;compression;lzw;retro-computing;binary-parsing;prodos;dos-3.3</PackageTags>
+    <PackageTags>shrinkit;nufx;apple-ii;archive;compression;lzw;retro-computing;binary-parsing;prodos;dos-3.3;binary-ii;bxy</PackageTags>
     <RepositoryType>git</RepositoryType>
     <RepositoryUrl>https://github.com/hughbe/ShrinkItReader</RepositoryUrl>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>

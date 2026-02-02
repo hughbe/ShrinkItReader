@@ -34,23 +34,20 @@ internal static class LzwDecompressor
     ];
 
     /// <summary>
-    /// Decompresses LZW/1 or LZW/2 compressed data from a stream.
+    /// Decompresses LZW/1 or LZW/2 compressed data from a stream and writes the output directly to the destination stream.
     /// </summary>
-    public static byte[] Decompress(Stream stream, long compressedDataLength, long decompressedDataLength, bool isType2)
+    /// <param name="inputStream">The input stream containing compressed data.</param>
+    /// <param name="outputStream">The output stream to write decompressed data to.</param>
+    /// <param name="compressedDataLength">The length of the compressed data.</param>
+    /// <param name="decompressedDataLength">The expected length of the decompressed data.</param>
+    /// <param name="isType2">True for LZW/2 format, false for LZW/1 format.</param>
+    public static void DecompressToStream(Stream inputStream, Stream outputStream, long compressedDataLength, long decompressedDataLength, bool isType2)
     {
         byte[] compressed = ArrayPool<byte>.Shared.Rent((int)compressedDataLength);
         try
         {
-            int totalRead = 0;
-            while (totalRead < (int)compressedDataLength)
-            {
-                int read = stream.Read(compressed, totalRead, (int)compressedDataLength - totalRead);
-                if (read == 0)
-                    throw new InvalidOperationException("Unexpected end of compressed data stream.");
-                totalRead += read;
-            }
-
-            return DecompressCore(compressed, (int)compressedDataLength, (int)decompressedDataLength, isType2);
+            ReadExact(inputStream, compressed, (int)compressedDataLength);
+            DecompressCoreToStream(compressed, (int)compressedDataLength, (int)decompressedDataLength, isType2, outputStream);
         }
         finally
         {
@@ -58,7 +55,22 @@ internal static class LzwDecompressor
         }
     }
 
-    private static byte[] DecompressCore(byte[] compressed, int compressedLength, int decompressedDataLength, bool isType2)
+    private static void ReadExact(Stream stream, byte[] buffer, int length)
+    {
+        int totalRead = 0;
+        while (totalRead < length)
+        {
+            int read = stream.Read(buffer, totalRead, length - totalRead);
+            if (read == 0)
+                throw new InvalidOperationException("Unexpected end of compressed data stream.");
+            totalRead += read;
+        }
+    }
+
+    /// <summary>
+    /// Core decompression implementation that writes output directly to a stream.
+    /// </summary>
+    private static void DecompressCoreToStream(byte[] compressed, int compressedLength, int decompressedDataLength, bool isType2, Stream outputStream)
     {
         int pos = 0;
 
@@ -74,8 +86,6 @@ internal static class LzwDecompressor
         byte diskVol = compressed[pos++];
         byte rleEscape = compressed[pos++];
 
-        byte[] output = new byte[decompressedDataLength];
-        int outputPos = 0;
         int uncompRemaining = decompressedDataLength;
 
         // Rent reusable buffers from the pool
@@ -196,8 +206,8 @@ internal static class LzwDecompressor
                     chunkCrc = Crc16.Calculate(blockBuf.AsSpan(blockOffset, BlockSize), chunkCrc);
                 }
 
-                blockBuf.AsSpan(blockOffset, writeLen).CopyTo(output.AsSpan(outputPos));
-                outputPos += writeLen;
+                // Write directly to output stream instead of copying to an intermediate buffer
+                outputStream.Write(blockBuf, blockOffset, writeLen);
                 uncompRemaining -= writeLen;
             }
 
@@ -207,8 +217,6 @@ internal static class LzwDecompressor
                 throw new InvalidOperationException(
                     $"LZW/1 CRC mismatch: expected 0x{fileCrc:X4}, got 0x{chunkCrc:X4}.");
             }
-
-            return output;
         }
         finally
         {

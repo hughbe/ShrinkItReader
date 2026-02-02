@@ -48,6 +48,17 @@ sealed class ExtractCommand : AsyncCommand<ExtractSettings>
         var archive = new ShrinkItArchive(stream);
 
         AnsiConsole.MarkupLine($"[cyan]Archive:[/] {input.Name}");
+        
+        // Show Binary II wrapper info if present
+        if (archive.BinaryIIHeader.HasValue)
+        {
+            var binaryII = archive.BinaryIIHeader.Value;
+            AnsiConsole.MarkupLine($"[cyan]Binary II Wrapper:[/] Yes (version {binaryII.Version})");
+            AnsiConsole.MarkupLine($"[cyan]  Wrapped File:[/] {binaryII.FileName}");
+            AnsiConsole.MarkupLine($"[cyan]  File Type:[/] 0x{binaryII.FileType:X2}");
+            AnsiConsole.MarkupLine($"[cyan]  Aux Type:[/] 0x{binaryII.AuxType:X4}");
+        }
+        
         AnsiConsole.MarkupLine($"[cyan]Total Records:[/] {archive.MasterHeaderBlock.TotalRecords}");
         AnsiConsole.MarkupLine($"[cyan]Output Directory:[/] {outputDir.FullName}");
         AnsiConsole.WriteLine();
@@ -67,32 +78,59 @@ sealed class ExtractCommand : AsyncCommand<ExtractSettings>
                     }
 
                     AnsiConsole.MarkupLine($"[yellow]Extracting:[/] {fileName}");
+                    
+                    // Show file metadata
+                    var header = entry.HeaderBlock;
+                    AnsiConsole.MarkupLine($"  [dim]File System:[/] {header.FileSystemId}");
+                    AnsiConsole.MarkupLine($"  [dim]Type:[/] 0x{header.FileType:X2}  [dim]Aux:[/] 0x{header.AuxType:X4}  [dim]Storage:[/] {header.StorageType}");
+                    AnsiConsole.MarkupLine($"  [dim]Created:[/] {header.CreationDate}  [dim]Modified:[/] {header.LastModificationDate}");
 
                     // Extract disk image
-                    var diskImage = archive.GetDiskImage(entry);
-                    if (diskImage != null)
+                    var diskImageThread = entry.Threads.FirstOrDefault(t => t.Classification == ShrinkItThreadClassification.Data && t.Kind == 0x0001);
+                    if (diskImageThread.CompressedDataSize > 0)
                     {
-                        var diskPath = Path.Combine(outputDir.FullName, $"{fileName}.dsk");
-                        await File.WriteAllBytesAsync(diskPath, diskImage, cancellationToken);
-                        AnsiConsole.MarkupLine($"  [dim]Disk image:[/] {diskPath} ({FormatSize(diskImage.Length)})");
+                        var diskImage = archive.GetDiskImage(entry);
+                        if (diskImage != null)
+                        {
+                            var diskPath = Path.Combine(outputDir.FullName, $"{fileName}.dsk");
+                            await File.WriteAllBytesAsync(diskPath, diskImage, cancellationToken);
+                            var ratio = diskImageThread.UncompressedDataSize > 0 
+                                ? (1.0 - (double)diskImageThread.CompressedDataSize / diskImageThread.UncompressedDataSize) * 100 
+                                : 0;
+                            AnsiConsole.MarkupLine($"  [dim]Disk image:[/] {diskPath} ({FormatSize(diskImage.Length)}) [{diskImageThread.Format}, {ratio:F1}% saved]");
+                        }
                     }
 
                     // Extract data fork
-                    var dataFork = archive.GetDataFork(entry);
-                    if (dataFork != null)
+                    var dataThread = entry.Threads.FirstOrDefault(t => t.Classification == ShrinkItThreadClassification.Data && t.Kind == 0x0000);
+                    if (dataThread.CompressedDataSize > 0)
                     {
-                        var dataPath = Path.Combine(outputDir.FullName, fileName);
-                        await File.WriteAllBytesAsync(dataPath, dataFork, cancellationToken);
-                        AnsiConsole.MarkupLine($"  [dim]Data fork:[/] {dataPath} ({FormatSize(dataFork.Length)})");
+                        var dataFork = archive.GetDataFork(entry);
+                        if (dataFork != null)
+                        {
+                            var dataPath = Path.Combine(outputDir.FullName, fileName);
+                            await File.WriteAllBytesAsync(dataPath, dataFork, cancellationToken);
+                            var ratio = dataThread.UncompressedDataSize > 0 
+                                ? (1.0 - (double)dataThread.CompressedDataSize / dataThread.UncompressedDataSize) * 100 
+                                : 0;
+                            AnsiConsole.MarkupLine($"  [dim]Data fork:[/] {dataPath} ({FormatSize(dataFork.Length)}) [{dataThread.Format}, {ratio:F1}% saved]");
+                        }
                     }
 
                     // Extract resource fork
-                    var resourceFork = archive.GetResourceFork(entry);
-                    if (resourceFork != null)
+                    var resourceThread = entry.Threads.FirstOrDefault(t => t.Classification == ShrinkItThreadClassification.Data && t.Kind == 0x0002);
+                    if (resourceThread.CompressedDataSize > 0)
                     {
-                        var resourcePath = Path.Combine(outputDir.FullName, $"{fileName}.rsrc");
-                        await File.WriteAllBytesAsync(resourcePath, resourceFork, cancellationToken);
-                        AnsiConsole.MarkupLine($"  [dim]Resource fork:[/] {resourcePath} ({FormatSize(resourceFork.Length)})");
+                        var resourceFork = archive.GetResourceFork(entry);
+                        if (resourceFork != null)
+                        {
+                            var resourcePath = Path.Combine(outputDir.FullName, $"{fileName}.rsrc");
+                            await File.WriteAllBytesAsync(resourcePath, resourceFork, cancellationToken);
+                            var ratio = resourceThread.UncompressedDataSize > 0 
+                                ? (1.0 - (double)resourceThread.CompressedDataSize / resourceThread.UncompressedDataSize) * 100 
+                                : 0;
+                            AnsiConsole.MarkupLine($"  [dim]Resource fork:[/] {resourcePath} ({FormatSize(resourceFork.Length)}) [{resourceThread.Format}, {ratio:F1}% saved]");
+                        }
                     }
 
                     task.Increment(1);

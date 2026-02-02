@@ -78,22 +78,14 @@ public readonly struct ShrinkItDateTime
         }
 
         // The minute, 0 through 59.
+        // Note: Some archives have values > 59, which overflow into hours.
         Minute = data[offset];
         offset += 1;
 
-        if (Minute > 59)
-        {
-            throw new ArgumentOutOfRangeException(nameof(data), "Minutes must be in the range 0-59.");
-        }
-
         // The hour, 0 through 23.
+        // Note: Some archives have values > 23, which overflow into days.
         Hour = data[offset];
         offset += 1;
-
-        if (Hour > 23)
-        {
-            throw new ArgumentOutOfRangeException(nameof(data), "Hours must be in the range 0-23.");
-        }
 
         // The current year minus 1900.
         Year = data[offset];
@@ -145,7 +137,15 @@ public readonly struct ShrinkItDateTime
             year += 100;
         }
 
-        return new(year, Month + 1, Day + 1, Hour, Minute, Second);
+        // Handle overflow: minutes > 59 should be added to hours
+        var minute = Minute % 60;
+        var hour = Hour + (Minute / 60);
+
+        // Handle overflow: hours > 23 should be added to days
+        var extraDays = hour / 24;
+        hour %= 24;
+
+        return new DateTime(year, Month + 1, Day + 1, hour, minute, Second).AddDays(extraDays);
     }
 
     /// <summary>
