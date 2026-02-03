@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using ProDosVolumeReader;
 using ShrinkItReader.Utilities;
 
 namespace ShrinkItReader;
@@ -57,7 +58,7 @@ public readonly struct ShrinkItHeaderBlock
     /// <summary>
     /// Gets the file type of the file being archived.
     /// </summary>
-    public uint FileType { get; }
+    public FileType FileType { get; }
 
     /// <summary>
     /// Gets the auxiliary type of the file being archived.
@@ -72,7 +73,7 @@ public readonly struct ShrinkItHeaderBlock
     /// <summary>
     /// Gets the storage type of the file.
     /// </summary>
-    public ShrinkItStorageType StorageType => (ShrinkItStorageType)(StorageTypeOrBlockSize & 0x00FF);
+    public StorageType StorageType => (StorageType)(StorageTypeOrBlockSize & 0x00FF);
 
     /// <summary>
     /// Gets the block size for disks.
@@ -217,7 +218,7 @@ public readonly struct ShrinkItHeaderBlock
         // The file type of the file being archived. For ProDOS 8 or GS/OS, this
         // field should always be what the operating system returns when asked.
         // For disks being archived, this field should be zero.
-        FileType = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(offset, 4));
+        FileType = (FileType)BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(offset, 4));
         offset += 4;
 
         // The auxiliary type of the file being archived. For ProDOS 8 or GS/OS,

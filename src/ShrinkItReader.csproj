@@ -31,6 +31,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="BinaryIIReader" Version="1.0.0" />
+    <PackageReference Include="ProDosVolumeReader" Version="1.0.0" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.2" />
   </ItemGroup>
 

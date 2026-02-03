@@ -1,5 +1,8 @@
-﻿using System.Diagnostics;
+﻿using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Security.Cryptography;
+using ProDosVolumeReader.Resources;
+using ProDosVolumeReader.Resources.Records;
 
 namespace ShrinkItReader.Tests;
 
@@ -109,6 +112,7 @@ public class AppleIIDiskTests
 
         Directory.CreateDirectory(outputDir);
 
+        Span<byte> buffer = stackalloc byte[4];
         for (int i = 0; i < archive.Entries.Count; i++)
         {
             var entry = archive.Entries[i];
@@ -130,7 +134,7 @@ public class AppleIIDiskTests
             Debug.WriteLine($"    - FileSystemId: {entry.HeaderBlock.FileSystemId}");
             Debug.WriteLine($"    - FileSystemInfo: {entry.HeaderBlock.FileSystemInfo}");
             Debug.WriteLine($"    - AccessFlags: {entry.HeaderBlock.AccessFlags}");
-            Debug.WriteLine($"    - FileType: 0x{entry.HeaderBlock.FileType:X4}");
+            Debug.WriteLine($"    - FileType: {entry.HeaderBlock.FileType} (0x{(byte)entry.HeaderBlock.FileType:X2})");
             Debug.WriteLine($"    - AuxType: 0x{entry.HeaderBlock.AuxType:X4}");
             Debug.WriteLine($"    - StorageType: {entry.HeaderBlock.StorageType}");
             Debug.WriteLine($"    - CreationDate: {entry.HeaderBlock.CreationDate}");
@@ -156,6 +160,247 @@ public class AppleIIDiskTests
             else
             {
                 Debug.WriteLine($"    - DataFork: None");
+            }
+
+            if (archive.GetResourceFork(entry) is byte[] resourceForkBytes)
+            {
+                string resourceForkPath = entryOutputPath + ".rsrc";
+                File.WriteAllBytes(resourceForkPath, resourceForkBytes);
+                Debug.WriteLine($"    - ResourceFork: {resourceForkBytes.Length} bytes written to {resourceForkPath}");
+
+                // Read the resource fork.
+                var resourceForkStream = new MemoryStream(resourceForkBytes);
+                resourceForkStream.Seek(0, SeekOrigin.Begin);
+
+                if (resourceForkStream.Length == 0)
+                {
+                    Debug.WriteLine($"Skipping Resource Fork for {entry.FileName} as it is empty.");
+                    return;
+                }
+
+                resourceForkStream.ReadExactly(buffer);
+                uint version = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
+                if (version > 127)
+                {
+                    Debug.WriteLine($"Resource Fork {entry.FileName} has Mac format (version {version}), skipping parse.");
+                    return;
+                }
+
+                resourceForkStream.Seek(0, SeekOrigin.Begin);
+
+                GsOsResourceFork resourceFork;
+                try
+                {
+                    resourceFork = new GsOsResourceFork(resourceForkStream);
+                }
+                catch (Exception ex) when (!(ex is FormatException) && !(ex is NotImplementedException))
+                {
+                    Debug.WriteLine($"Failed to parse Resource Fork for {entry.FileName}.");
+                    throw;
+                }
+
+                Debug.WriteLine($"Successfully parsed Resource Fork for {entry.FileName} with {resourceFork.Map.ReferenceRecords.Length} resource index records.");
+
+                foreach (var record in resourceFork.Map.ReferenceRecords)
+                {
+                    Debug.WriteLine($"  Resource Type: {record.Type}, ID: {record.ResourceID}, Offset: {record.DataOffset}, Size: {record.DataSize}, Attr: {record.Attributes}, PurgeLevel: {record.PurgeLevel}");
+
+                    if (record.DataSize == 0)
+                    {
+                        Debug.WriteLine("    - Empty resource, skipping.");
+                        continue;
+                    }
+
+                    // Export the binary data for the resource.
+                    var resourceOutputPath = $"{entryOutputPath}.id_{record.ResourceID}";
+                    Debug.WriteLine($"    Extracting Resource to {resourceOutputPath}");
+                    byte[] resourceData = resourceFork.GetResourceData(record);
+                    File.WriteAllBytes(resourceOutputPath, resourceData);
+
+                    switch (record.Type)
+                    {
+                        case GsOsResourceForkType.Icon:
+                        {
+                            var iconRecord = new IconRecord(resourceData);
+                            Debug.WriteLine($"    Icon Record: Width={iconRecord.Width}, Height={iconRecord.Height}, Size={iconRecord.Size} bytes");
+                            break;
+                        }
+                   
+                        case GsOsResourceForkType.ControlList:
+                        {
+                            var controlListRecord = new ControlListRecord(resourceData);
+                            Debug.WriteLine($"    Control List Record: ControlCount={controlListRecord.Controls.Count}");
+                            foreach (var control in controlListRecord.Controls)
+                            {
+                                Debug.WriteLine($"      Control: ID={control}");
+                            }
+
+                            break;
+                        }
+
+                        case GsOsResourceForkType.ControlTemplate:
+                        {
+                            var controlTemplateRecord = new ControlTemplateRecord(resourceData);
+                            Debug.WriteLine($"    Control Template Record: ID={controlTemplateRecord.Header.ID}, Procedure={controlTemplateRecord.Header.Procedure}, Flags=0x{controlTemplateRecord.Header.Flags.Value:X4}, MoreFlags=0x{(int)controlTemplateRecord.Header.MoreFlags:X4}, ParameterCount={controlTemplateRecord.Header.ParameterCount}");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.PascalString:
+                        {
+                            var pascalStringRecord = new PascalStringRecord(resourceData);
+                            Debug.WriteLine($"    Pascal String: '{pascalStringRecord.StringCharacters}'");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.ToolStartup:
+                        {
+                            var toolStartupRecord = new ToolStartupRecord(resourceData);
+                            Debug.WriteLine($"    Tool Startup Record: Flags=0x{toolStartupRecord.Flags:X4}, VideoMode=0x{toolStartupRecord.VideoMode:X4}, ResourceFileID=0x{toolStartupRecord.ResourceFileID:X4}, PageHandle=0x{toolStartupRecord.PageHandle:X8}, NumberOfTools={toolStartupRecord.NumberOfTools}");
+                            foreach (var tool in toolStartupRecord.Tools)
+                            {
+                                Debug.WriteLine($"      Tool: Number=0x{tool.ToolNumber:X4}, MinVersion=0x{tool.MinVersion:X4}");
+                            }
+
+                            break;
+                        }
+
+                        case GsOsResourceForkType.MenuBar:
+                        {
+                            var menuBarRecord = new MenuBarRecord(resourceData);
+                            Debug.WriteLine($"    Menu Bar Record: Version={menuBarRecord.Version}, Flags=0x{menuBarRecord.Flags.RawValue:X4}, MenusReferenceCount={menuBarRecord.MenuReferences.Count}");
+                            foreach (var menuRef in menuBarRecord.MenuReferences)
+                            {
+                                Debug.WriteLine($"      Menu Reference: 0x{menuRef:X8}");
+                            }
+
+                            break;
+                        }
+
+                        case GsOsResourceForkType.Menu:
+                        {
+                            var menuRecord = new MenuRecord(resourceData);
+                            Debug.WriteLine($"    Menu Record: ID={menuRecord.ID}, Version={menuRecord.Version}, Flags=0x{menuRecord.Flags.Value:X4}, TitleRef={menuRecord.TitleReference}, ItemReferences={menuRecord.ItemReferences.Count}");
+                            foreach (var itemRef in menuRecord.ItemReferences)
+                            {
+                                Debug.WriteLine($"      Item Reference: 0x{itemRef:X8}");
+                            }
+
+                            break;
+                        }
+
+                        case GsOsResourceForkType.MenuItem:
+                        {
+                            var menuItemRecord = new MenuItemRecord(resourceData);
+                            Debug.WriteLine($"    Menu Item Record: ID={menuItemRecord.MenuItemID}, Version={menuItemRecord.Version}, PrimaryKeystroke=0x{menuItemRecord.PrimaryKeystrokeEquivalentCharacter:X2}, AlternateKeystroke=0x{menuItemRecord.AlternateKeystrokeEquivalentCharacter:X2}, CheckmarkChar='{menuItemRecord.ItemCheckmarkCharacter}', Flags=0x{menuItemRecord.Flags.Value:X4}, TitleRef={menuItemRecord.TitleReference}");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.WindowParam1:
+                        {
+                            var windowParam1Record = new WindowParam1Record(resourceData);
+                            Debug.WriteLine($"    Window Param1 Record: Length={windowParam1Record.Length} bytes, Frame=0x{windowParam1Record.Frame:X2} TitleReference={windowParam1Record.TitleReference}, InfoTextHeight={windowParam1Record.InfoTextHeight}, FrameDefinitionProcedure=0x{windowParam1Record.FrameDefinitionProcedure:X8}, InfoTextDefinitionProcedure=0x{windowParam1Record.InfoTextDefinitionProcedure:X8}, ContentDefinitionProcedure=0x{windowParam1Record.ContentDefinitionProcedure:X8}, Position=({windowParam1Record.Position.Left},{windowParam1Record.Position.Top},{windowParam1Record.Position.Right},{windowParam1Record.Position.Bottom}), Plane={windowParam1Record.Plane}, ControlTemplateReference={windowParam1Record.ControlTemplateReference}, ReferenceTypes=0x{windowParam1Record.ReferenceTypes.RawValue:X4}");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.TextEditStyle:
+                        {
+                            var textStyleRecord = new TextStyleRecord(resourceData);
+                            Debug.WriteLine($"    Text Style Record: TEFormat Version={textStyleRecord.Format.Version}, RulerCount={textStyleRecord.Format.Rulers.Count}, StyleCount={textStyleRecord.Format.Styles.Count}, StyleItemCount={textStyleRecord.Format.NumberOfStyles}");
+                            foreach (var ruler in textStyleRecord.Format.Rulers)
+                            {
+                                Debug.WriteLine($"      Ruler: LeftMargin={ruler.LeftMargin}, LeftIndent={ruler.LeftIndent}, RightMargin={ruler.RightMargin}, Justification={ruler.TabType}, TabStopCount={ruler.TabStops?.Count ?? 0}, TabTerminator={ruler.TabTerminator}");
+                                foreach (var tabStop in ruler.TabStops ?? Enumerable.Empty<ushort>())
+                                {
+                                    Debug.WriteLine($"        Tab Stop: {tabStop}");
+                                }
+                            }
+                            foreach (var style in textStyleRecord.Format.Styles)
+                            {
+                                Debug.WriteLine($"      Style: FontID={style.FontID}, ForegroundColor=0x{style.ForegroundColor:X4}, BackgroundColor=0x{style.BackgroundColor:X4}, UserData=0x{style.UserData:X8}");
+                            }
+                            foreach (var styleItem in textStyleRecord.Format.StyleItems)
+                            {
+                                Debug.WriteLine($"      Style Item: Length={styleItem.Length}, Offset={styleItem.Offset}");
+                            }
+
+                            break;
+                        }
+
+                        case GsOsResourceForkType.TextForLETextBox2:
+                        {
+                            var textBox2Record = new TextForLETextBox2Record(resourceData);
+                            Debug.WriteLine($"    Text Box 2 Record: Length={textBox2Record.Length} bytes");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.AlertString:
+                        {
+                            var alertStringRecord = new AlertStringRecord(resourceData);
+                            Debug.WriteLine($"    Alert String Record: '{alertStringRecord.Message}'");
+                            break;
+                        }
+                        
+                        case GsOsResourceForkType.CDEVCode:
+                        {
+                            var codeRecord = new CodeRecord(resourceData);
+                            Debug.WriteLine($"    CDEV Code Record: CodeLength={codeRecord.Data.Length}");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.CDEVFlags:
+                        {
+                            var cdevFlagsRecord = new CDEVFlagsRecord(resourceData);
+                            Debug.WriteLine($"    CDEV Flags Record: Flags=0x{cdevFlagsRecord.Flags:X4}, Enabled={cdevFlagsRecord.Enabled}, Version={cdevFlagsRecord.Version}, Machine={cdevFlagsRecord.Machine}, Reserved={cdevFlagsRecord.Reserved}, DataRectangle={cdevFlagsRecord.DataRectangle}, CDEVName='{cdevFlagsRecord.CDEVName}', AuthorName='{cdevFlagsRecord.AuthorName}', VersionName='{cdevFlagsRecord.VersionName}'");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.ErrorString:
+                        {
+                            var errorStringRecord = new ErrorStringRecord(resourceData);
+                            Debug.WriteLine($"    Error String Record: '{errorStringRecord.Message}'");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.Version:
+                        {
+                            var versionRecord = new VersionRecord(resourceData);
+                            Debug.WriteLine($"    Version Record: Version={versionRecord.Version}, Region={versionRecord.Region}, Name='{versionRecord.Name}', MoreInfo='{versionRecord.MoreInfo}'");
+                            break;
+                        }
+
+                        case GsOsResourceForkType.Comment:
+                        {
+                            var commentRecord = new CommentRecord(resourceData);
+                            Debug.WriteLine($"    Comment Record: '{commentRecord.Comment}'");
+                            break;
+                        }
+
+                        case (GsOsResourceForkType)0x6FFE:
+                        case (GsOsResourceForkType)0x6FFF:
+                        case (GsOsResourceForkType)0x7001:
+                        {
+                            // Unknown.
+                            break;
+                        }
+
+                        default:
+                        {
+                            if (Enum.IsDefined(record.Type))
+                            {
+                                throw new NotImplementedException($"Resource Type {record.Type} not supported.");
+                            }
+                            else
+                            {
+                                throw new NotImplementedException($"Resource Type 0x{(ushort)record.Type:X4} not supported.");
+                            }
+                        }
+                    }
+                }
+
+            }
+            else
+            {
+                Debug.WriteLine($"    - ResourceFork: None");
             }
         }
     }

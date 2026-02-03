@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics.Contracts;
 using System.Text;
+using BinaryIIReader;
 using ShrinkItReader.Utilities;
 
 namespace ShrinkItReader;
@@ -18,7 +19,7 @@ public class ShrinkItArchive
     /// <summary>
     /// Gets the Binary II header if this archive was wrapped in Binary II format.
     /// </summary>
-    public BinaryIIHeader? BinaryIIHeader { get; }
+    public BinaryIIReader.BinaryIIHeader? BinaryIIHeader { get; }
 
     /// <summary>
     /// Gets the Master Header Block of the archive.
@@ -46,16 +47,16 @@ public class ShrinkItArchive
         _streamStartOffset = stream.Position;
 
         // Read enough bytes to detect Binary II or NuFX header
-        Span<byte> headerBuffer = stackalloc byte[ShrinkItReader.BinaryIIHeader.Size];
+        Span<byte> headerBuffer = stackalloc byte[BinaryIIReader.BinaryIIHeader.Size];
         if (stream.Read(headerBuffer) != headerBuffer.Length)
         {
             throw new ArgumentException("Stream is too small to contain a valid ShrinkIt archive.", nameof(stream));
         }
 
         // Check if this is a Binary II wrapped archive
-        if (ShrinkItReader.BinaryIIHeader.IsBinaryII(headerBuffer))
+        if (BinaryIIReader.BinaryIIHeader.IsBinaryII(headerBuffer))
         {
-            BinaryIIHeader = new BinaryIIHeader(headerBuffer);
+            BinaryIIHeader = new BinaryIIReader.BinaryIIHeader(headerBuffer);
             
             // The NuFX archive starts immediately after the Binary II header
             // Read the NuFX master header block
