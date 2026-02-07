@@ -77,7 +77,7 @@ public class ShrinkItArchiveEntry
 
         HeaderBlock = new ShrinkItHeaderBlock(buffer);
         var bytesRead = ShrinkItHeaderBlock.Size;
-        
+
         // The following option_list information is only present if the NuFX
         // version number for this record is $0001 or greater.
         // The length of the FST-specific portion of a GS/OS option_list
@@ -126,7 +126,7 @@ public class ShrinkItArchiveEntry
             {
                 throw new ArgumentException("Stream is too small to contain full extra header data.", nameof(stream));
             }
-            
+
             ExtraData = extraHeaderData;
         }
         else
@@ -164,13 +164,13 @@ public class ShrinkItArchiveEntry
             FileName = string.Empty;
         }
 
-        // Thread Records are 16-byte records which immediately follow the Header Block 
-        // (composed of the attributes and file name of the current record) and describe 
-        // the types of data structures which are included with a given record. The 
-        // number of Thread Records is described in the attribute section by a Word, 
+        // Thread Records are 16-byte records which immediately follow the Header Block
+        // (composed of the attributes and file name of the current record) and describe
+        // the types of data structures which are included with a given record. The
+        // number of Thread Records is described in the attribute section by a Word,
         // total_threads.
         long totalThreadDataSize = 0;
-        var threads = new List<ShrinkItThread>();
+        var threads = new List<ShrinkItThread>((int)HeaderBlock.TotalThreads);
         for (int threadIndex = 0; threadIndex < HeaderBlock.TotalThreads; threadIndex++)
         {
             if (stream.Read(buffer[..ShrinkItThread.Size]) != ShrinkItThread.Size)
@@ -189,4 +189,83 @@ public class ShrinkItArchiveEntry
         DataOffset = stream.Position;
         DataLength = totalThreadDataSize;
     }
-} 
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ShrinkItArchiveEntry"/> class from a memory span.
+    /// This avoids stream overhead when parsing from in-memory data.
+    /// </summary>
+    /// <param name="data">The span of data starting at this entry.</param>
+    /// <param name="baseOffset">The absolute offset of this entry in the archive.</param>
+    internal ShrinkItArchiveEntry(ReadOnlySpan<byte> data, long baseOffset)
+    {
+        Offset = baseOffset;
+        int pos = 0;
+
+        // Read the Header Block
+        HeaderBlock = new ShrinkItHeaderBlock(data.Slice(pos, ShrinkItHeaderBlock.Size));
+        pos += ShrinkItHeaderBlock.Size;
+        var bytesRead = ShrinkItHeaderBlock.Size;
+
+        if (HeaderBlock.VersionNumber >= 1)
+        {
+            OptionListLength = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(pos, 2));
+            pos += 2;
+            bytesRead += 2;
+
+            if (OptionListLength > 0)
+            {
+                OptionList = data.Slice(pos, OptionListLength).ToArray();
+                pos += OptionListLength;
+                bytesRead += OptionListLength;
+            }
+            else
+            {
+                OptionList = [];
+            }
+        }
+        else
+        {
+            OptionListLength = 0;
+            OptionList = null;
+        }
+
+        var extraHeaderDataLength = HeaderBlock.AttributesCount - 2 - bytesRead;
+        if (extraHeaderDataLength > 0)
+        {
+            ExtraData = data.Slice(pos, extraHeaderDataLength).ToArray();
+            pos += extraHeaderDataLength;
+        }
+        else
+        {
+            ExtraData = null;
+        }
+
+        FileNameLength = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(pos, 2));
+        pos += 2;
+
+        if (FileNameLength > 0)
+        {
+            FileName = Encoding.ASCII.GetString(data.Slice(pos, FileNameLength));
+            pos += FileNameLength;
+        }
+        else
+        {
+            FileName = string.Empty;
+        }
+
+        long totalThreadDataSize = 0;
+        var threads = new List<ShrinkItThread>((int)HeaderBlock.TotalThreads);
+        for (int threadIndex = 0; threadIndex < HeaderBlock.TotalThreads; threadIndex++)
+        {
+            var thread = new ShrinkItThread(data.Slice(pos, ShrinkItThread.Size));
+            totalThreadDataSize += thread.CompressedDataSize;
+            threads.Add(thread);
+            pos += ShrinkItThread.Size;
+        }
+
+        Threads = threads;
+
+        DataOffset = baseOffset + pos;
+        DataLength = totalThreadDataSize;
+    }
+}

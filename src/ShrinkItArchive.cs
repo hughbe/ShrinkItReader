@@ -12,7 +12,9 @@ namespace ShrinkItReader;
 /// </summary>
 public class ShrinkItArchive
 {
-    private readonly Stream _stream;
+    private readonly Stream? _stream;
+
+    private readonly ReadOnlyMemory<byte> _data;
 
     private readonly long _streamStartOffset;
 
@@ -30,6 +32,40 @@ public class ShrinkItArchive
     /// Gets the entries in the archive.
     /// </summary>
     public List<ShrinkItArchiveEntry> Entries { get; }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ShrinkItArchive"/> class from in-memory data.
+    /// This is the most efficient constructor as it avoids all stream overhead during parsing and extraction.
+    /// </summary>
+    /// <param name="data">The archive data in memory.</param>
+    public ShrinkItArchive(ReadOnlyMemory<byte> data)
+    {
+        _data = data;
+        var span = data.Span;
+        int pos = 0;
+
+        // Check if this is a Binary II wrapped archive
+        if (BinaryIIReader.BinaryIIHeader.IsBinaryII(span))
+        {
+            BinaryIIHeader = new BinaryIIReader.BinaryIIHeader(span);
+            pos = BinaryIIReader.BinaryIIHeader.Size;
+        }
+
+        // Parse master header block
+        MasterHeaderBlock = new ShrinkItMasterHeaderBlock(span.Slice(pos, ShrinkItMasterHeaderBlock.Size));
+        pos += ShrinkItMasterHeaderBlock.Size;
+
+        // Parse entries from memory
+        var entries = new List<ShrinkItArchiveEntry>((int)MasterHeaderBlock.TotalRecords);
+        for (int i = 0; i < MasterHeaderBlock.TotalRecords; i++)
+        {
+            var entry = new ShrinkItArchiveEntry(span[pos..], pos);
+            entries.Add(entry);
+            pos = (int)(entry.DataOffset + entry.DataLength);
+        }
+
+        Entries = entries;
+    }
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ShrinkItArchive"/> class.
@@ -57,7 +93,7 @@ public class ShrinkItArchive
         if (BinaryIIReader.BinaryIIHeader.IsBinaryII(headerBuffer))
         {
             BinaryIIHeader = new BinaryIIReader.BinaryIIHeader(headerBuffer);
-            
+
             // The NuFX archive starts immediately after the Binary II header
             // Read the NuFX master header block
             Span<byte> masterHeaderBlockBuffer = stackalloc byte[ShrinkItMasterHeaderBlock.Size];
@@ -65,7 +101,7 @@ public class ShrinkItArchive
             {
                 throw new ArgumentException("Stream is too small to contain a valid ShrinkIt archive after Binary II header.", nameof(stream));
             }
-            
+
             MasterHeaderBlock = new ShrinkItMasterHeaderBlock(masterHeaderBlockBuffer);
         }
         else
@@ -73,12 +109,12 @@ public class ShrinkItArchive
             // Not Binary II - treat as raw NuFX archive
             // The header buffer already contains the master header block data
             MasterHeaderBlock = new ShrinkItMasterHeaderBlock(headerBuffer.Slice(0, ShrinkItMasterHeaderBlock.Size));
-            
+
             // Seek back to after the master header block since we read 128 bytes but only needed 48
             stream.Seek(_streamStartOffset + ShrinkItMasterHeaderBlock.Size, SeekOrigin.Begin);
         }
 
-        var entries = new List<ShrinkItArchiveEntry>();
+        var entries = new List<ShrinkItArchiveEntry>((int)MasterHeaderBlock.TotalRecords);
         for (int i = 0; i < MasterHeaderBlock.TotalRecords; i++)
         {
             // Read an entry.
@@ -196,7 +232,59 @@ public class ShrinkItArchive
 
     private void ExtractDecompressedDataTo(ShrinkItThread thread, long offset, Stream outputStream)
     {
-        _stream.Seek(offset, SeekOrigin.Begin);
+        if (!_data.IsEmpty)
+        {
+            ExtractFromMemory(thread, (int)offset, outputStream);
+        }
+        else
+        {
+            ExtractFromStream(thread, offset, outputStream);
+        }
+    }
+
+    private void ExtractFromMemory(ShrinkItThread thread, int offset, Stream outputStream)
+    {
+        switch (thread.Format)
+        {
+            case ShrinkItThreadFormat.Uncompressed:
+            {
+                var toCopy = (int)Math.Min(thread.UncompressedDataSize, thread.CompressedDataSize);
+                outputStream.Write(_data.Span.Slice(offset, toCopy));
+
+                var padding = (int)thread.UncompressedDataSize - toCopy;
+                if (padding > 0)
+                {
+                    Span<byte> zeros = stackalloc byte[Math.Min(padding, 4096)];
+                    zeros.Clear();
+                    while (padding > 0)
+                    {
+                        var toPad = Math.Min(padding, zeros.Length);
+                        outputStream.Write(zeros[..toPad]);
+                        padding -= toPad;
+                    }
+                }
+                break;
+            }
+            case ShrinkItThreadFormat.DynamicLzw1:
+            {
+                var compressed = _data.Span.Slice(offset, (int)thread.CompressedDataSize);
+                LzwDecompressor.DecompressSpanToStream(compressed, outputStream, (int)thread.UncompressedDataSize, isType2: false);
+                break;
+            }
+            case ShrinkItThreadFormat.DynamicLzw2:
+            {
+                var compressed = _data.Span.Slice(offset, (int)thread.CompressedDataSize);
+                LzwDecompressor.DecompressSpanToStream(compressed, outputStream, (int)thread.UncompressedDataSize, isType2: true);
+                break;
+            }
+            default:
+                throw new NotSupportedException($"Thread format {thread.Format} is not supported.");
+        }
+    }
+
+    private void ExtractFromStream(ShrinkItThread thread, long offset, Stream outputStream)
+    {
+        _stream!.Seek(offset, SeekOrigin.Begin);
 
         switch (thread.Format)
         {
@@ -204,7 +292,7 @@ public class ShrinkItArchive
             {
                 var toRead = (int)Math.Min(thread.UncompressedDataSize, thread.CompressedDataSize);
                 CopyBytes(_stream, outputStream, toRead);
-                
+
                 // If uncompressed size is larger, pad with zeros
                 var padding = (int)thread.UncompressedDataSize - toRead;
                 if (padding > 0)
@@ -267,14 +355,61 @@ public class ShrinkItArchive
         {
             if (thread.Classification == classification && thread.Kind == kind)
             {
-                var memoryStream = new MemoryStream((int)thread.UncompressedDataSize);
-                ExtractDecompressedDataTo(thread, offset, memoryStream);
-                return memoryStream.ToArray();
+                if (!_data.IsEmpty)
+                {
+                    return ReadDecompressedDataFromMemory(thread, (int)offset);
+                }
+                else
+                {
+                    return ReadDecompressedDataFromStream(thread, offset);
+                }
             }
 
             offset += thread.CompressedDataSize;
         }
 
         return null;
+    }
+
+    private byte[] ReadDecompressedDataFromMemory(ShrinkItThread thread, int offset)
+    {
+        var result = new byte[(int)thread.UncompressedDataSize];
+
+        switch (thread.Format)
+        {
+            case ShrinkItThreadFormat.Uncompressed:
+            {
+                var toCopy = (int)Math.Min(thread.UncompressedDataSize, thread.CompressedDataSize);
+                _data.Span.Slice(offset, toCopy).CopyTo(result);
+                // Remaining bytes are already zero (new byte[] is zero-initialized)
+                break;
+            }
+            case ShrinkItThreadFormat.DynamicLzw1:
+            {
+                var compressed = _data.Span.Slice(offset, (int)thread.CompressedDataSize);
+                LzwDecompressor.DecompressToBuffer(compressed, result, (int)thread.UncompressedDataSize, isType2: false);
+                break;
+            }
+            case ShrinkItThreadFormat.DynamicLzw2:
+            {
+                var compressed = _data.Span.Slice(offset, (int)thread.CompressedDataSize);
+                LzwDecompressor.DecompressToBuffer(compressed, result, (int)thread.UncompressedDataSize, isType2: true);
+                break;
+            }
+            default:
+                throw new NotSupportedException($"Thread format {thread.Format} is not supported.");
+        }
+
+        return result;
+    }
+
+    private byte[] ReadDecompressedDataFromStream(ShrinkItThread thread, long offset)
+    {
+        // Pre-allocate the result array and wrap in a non-expandable MemoryStream.
+        // This avoids the double allocation from MemoryStream.ToArray().
+        var result = new byte[(int)thread.UncompressedDataSize];
+        using var resultStream = new MemoryStream(result, writable: true);
+        ExtractFromStream(thread, offset, resultStream);
+        return result;
     }
 }

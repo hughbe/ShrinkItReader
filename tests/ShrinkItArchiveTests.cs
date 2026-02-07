@@ -408,7 +408,7 @@ public class AppleIIDiskTests
     [Fact]
     public void Ctor_NullStream_ThrowsArgumentNullException()
     {
-        Assert.Throws<ArgumentNullException>("stream", () => new ShrinkItArchive(null!));
+        Assert.Throws<ArgumentNullException>("stream", () => new ShrinkItArchive((Stream)null!));
     }
 
     /// <summary>

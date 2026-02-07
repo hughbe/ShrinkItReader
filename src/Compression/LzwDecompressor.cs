@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using ShrinkItReader.Utilities;
 
 namespace ShrinkItReader;
@@ -33,6 +34,29 @@ internal static class LzwDecompressor
         8, 9, 10, 10, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12
     ];
 
+    private interface IOutputSink
+    {
+        void Write(ReadOnlySpan<byte> data);
+    }
+
+    private struct StreamSink(Stream stream) : IOutputSink
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly void Write(ReadOnlySpan<byte> data) => stream.Write(data);
+    }
+
+    private struct BufferSink(byte[] buffer) : IOutputSink
+    {
+        private int _position;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Write(ReadOnlySpan<byte> data)
+        {
+            data.CopyTo(buffer.AsSpan(_position));
+            _position += data.Length;
+        }
+    }
+
     /// <summary>
     /// Decompresses LZW/1 or LZW/2 compressed data from a stream and writes the output directly to the destination stream.
     /// </summary>
@@ -47,12 +71,41 @@ internal static class LzwDecompressor
         try
         {
             ReadExact(inputStream, compressed, (int)compressedDataLength);
-            DecompressCoreToStream(compressed, (int)compressedDataLength, (int)decompressedDataLength, isType2, outputStream);
+            var sink = new StreamSink(outputStream);
+            DecompressCore(compressed.AsSpan(0, (int)compressedDataLength), (int)decompressedDataLength, isType2, ref sink);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(compressed);
         }
+    }
+
+    /// <summary>
+    /// Decompresses LZW/1 or LZW/2 compressed data from a memory span and writes the output directly to a byte array.
+    /// This avoids intermediate stream and buffer allocations.
+    /// </summary>
+    /// <param name="compressed">The compressed data span.</param>
+    /// <param name="output">The output byte array to write decompressed data to.</param>
+    /// <param name="decompressedDataLength">The expected length of the decompressed data.</param>
+    /// <param name="isType2">True for LZW/2 format, false for LZW/1 format.</param>
+    public static void DecompressToBuffer(ReadOnlySpan<byte> compressed, byte[] output, int decompressedDataLength, bool isType2)
+    {
+        var sink = new BufferSink(output);
+        DecompressCore(compressed, decompressedDataLength, isType2, ref sink);
+    }
+
+    /// <summary>
+    /// Decompresses LZW/1 or LZW/2 compressed data from a memory span and writes the output directly to a stream.
+    /// This avoids the intermediate buffer allocation for the compressed data.
+    /// </summary>
+    /// <param name="compressed">The compressed data span.</param>
+    /// <param name="outputStream">The output stream to write decompressed data to.</param>
+    /// <param name="decompressedDataLength">The expected length of the decompressed data.</param>
+    /// <param name="isType2">True for LZW/2 format, false for LZW/1 format.</param>
+    public static void DecompressSpanToStream(ReadOnlySpan<byte> compressed, Stream outputStream, int decompressedDataLength, bool isType2)
+    {
+        var sink = new StreamSink(outputStream);
+        DecompressCore(compressed, decompressedDataLength, isType2, ref sink);
     }
 
     private static void ReadExact(Stream stream, byte[] buffer, int length)
@@ -68,9 +121,11 @@ internal static class LzwDecompressor
     }
 
     /// <summary>
-    /// Core decompression implementation that writes output directly to a stream.
+    /// Core decompression implementation using a generic output sink for zero-overhead abstraction.
+    /// The JIT specializes this method for each sink type, devirtualizing all Write calls.
     /// </summary>
-    private static void DecompressCoreToStream(byte[] compressed, int compressedLength, int decompressedDataLength, bool isType2, Stream outputStream)
+    private static void DecompressCore<TSink>(ReadOnlySpan<byte> compressed, int decompressedDataLength, bool isType2, ref TSink sink)
+        where TSink : struct, IOutputSink
     {
         int pos = 0;
 
@@ -78,7 +133,7 @@ internal static class LzwDecompressor
         ushort fileCrc = 0;
         if (!isType2)
         {
-            fileCrc = BinaryPrimitives.ReadUInt16LittleEndian(compressed.AsSpan(pos, 2));
+            fileCrc = BinaryPrimitives.ReadUInt16LittleEndian(compressed.Slice(pos, 2));
             pos += 2;
         }
 
@@ -139,25 +194,21 @@ internal static class LzwDecompressor
                 bool rleUsed = rleLen != BlockSize;
                 int writeLen = Math.Min(BlockSize, uncompRemaining);
 
-                // Pointer to the block data to copy to output
-                byte[] blockBuf;
-                int blockOffset = 0;
+                // Block data span for output and CRC
+                ReadOnlySpan<byte> blockSpan;
 
                 if (lzwUsed)
                 {
-                    // Clear the lzwBuf using Span for better performance
-                    lzwBuf.AsSpan(0, BlockSize).Clear();
-
                     if (!isType2)
                     {
                         // LZW/1: table is cleared for each block
-                        int consumed = ExpandLzw1(compressed.AsSpan(pos), lzwBuf, rleLen, trieCh, triePrefix, stack);
+                        int consumed = ExpandLzw1(compressed.Slice(pos), lzwBuf, rleLen, trieCh, triePrefix, stack);
                         pos += consumed;
                     }
                     else
                     {
                         // LZW/2: table persists across blocks
-                        int consumed = ExpandLzw2(compressed.AsSpan(pos), lzwBuf, rleLen,
+                        int consumed = ExpandLzw2(compressed.Slice(pos), lzwBuf, rleLen,
                             trieCh, triePrefix, stack,
                             ref entry, ref oldcode, ref incode, ref finalc, ref resetFix,
                             lzwLen);
@@ -166,30 +217,27 @@ internal static class LzwDecompressor
 
                     if (rleUsed)
                     {
-                        rleBuf.AsSpan(0, BlockSize).Clear();
                         ExpandRle(lzwBuf.AsSpan(0, rleLen), rleBuf, rleEscape);
-                        blockBuf = rleBuf;
+                        blockSpan = rleBuf.AsSpan(0, BlockSize);
                     }
                     else
                     {
-                        blockBuf = lzwBuf;
+                        blockSpan = lzwBuf.AsSpan(0, BlockSize);
                     }
                 }
                 else
                 {
                     if (rleUsed)
                     {
-                        rleBuf.AsSpan(0, BlockSize).Clear();
-                        ExpandRle(compressed.AsSpan(pos, rleLen), rleBuf, rleEscape);
+                        ExpandRle(compressed.Slice(pos, rleLen), rleBuf, rleEscape);
                         pos += rleLen;
-                        blockBuf = rleBuf;
+                        blockSpan = rleBuf.AsSpan(0, BlockSize);
                     }
                     else
                     {
-                        // No compression at all - raw 4K block, use compressed buffer directly
-                        blockBuf = compressed;
-                        blockOffset = pos;
-                        pos += writeLen;
+                        // No compression at all - raw 4K block
+                        blockSpan = compressed.Slice(pos, BlockSize);
+                        pos += BlockSize;
                     }
 
                     // When LZW is not used, reset LZW/2 table state
@@ -203,11 +251,11 @@ internal static class LzwDecompressor
                 // CRC for LZW/1 always covers the full 4K block (including zero-padding)
                 if (!isType2)
                 {
-                    chunkCrc = Crc16.Calculate(blockBuf.AsSpan(blockOffset, BlockSize), chunkCrc);
+                    chunkCrc = Crc16.Calculate(blockSpan.Slice(0, BlockSize), chunkCrc);
                 }
 
-                // Write directly to output stream instead of copying to an intermediate buffer
-                outputStream.Write(blockBuf, blockOffset, writeLen);
+                // Write to output via the sink
+                sink.Write(blockSpan.Slice(0, writeLen));
                 uncompRemaining -= writeLen;
             }
 
@@ -232,7 +280,7 @@ internal static class LzwDecompressor
     /// Reads a variable-width LZW code from the input bitstream.
     /// The bit width is determined by the current table entry count.
     /// </summary>
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint GetCode(ReadOnlySpan<byte> input, ref int pos, int entry, ref int atBit, ref uint lastByte)
     {
         int numBits = (entry + 1) >> 8;

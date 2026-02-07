@@ -43,10 +43,12 @@ dotnet add package ShrinkItReader
 ```csharp
 using ShrinkItReader;
 
-// Open a ShrinkIt archive file
-using var stream = File.OpenRead("archive.shk");
+// Open from in-memory data (fastest - avoids all stream overhead)
+byte[] data = File.ReadAllBytes("archive.shk");
+var archive = new ShrinkItArchive(data);
 
-// Parse the archive
+// Or open from a stream
+using var stream = File.OpenRead("archive.shk");
 var archive = new ShrinkItArchive(stream);
 
 // Get archive information
@@ -102,6 +104,20 @@ foreach (var entry in archive.Entries)
 }
 ```
 
+### Streaming Extraction
+
+For large archives, you can extract directly to a stream to avoid intermediate allocations:
+
+```csharp
+foreach (var entry in archive.Entries)
+{
+    var fileName = archive.GetFileName(entry);
+
+    using var outputFile = File.Create(fileName);
+    archive.ExtractDataForkTo(entry, outputFile);
+}
+```
+
 ### Examining Thread Information
 
 ```csharp
@@ -128,14 +144,18 @@ foreach (var entry in archive.Entries)
 
 The main class for reading ShrinkIt/NuFX archives.
 
+- `ShrinkItArchive(ReadOnlyMemory<byte> data)` - Opens an archive from in-memory data (fastest)
 - `ShrinkItArchive(Stream stream)` - Opens an archive from a stream
 - `BinaryIIHeader` - Gets the Binary II header if the archive was wrapped (nullable)
 - `MasterHeaderBlock` - Gets the Master Header Block with archive metadata
 - `Entries` - Gets the list of archive entries
 - `GetFileName(ShrinkItArchiveEntry)` - Gets the file name for an entry
-- `GetDataFork(ShrinkItArchiveEntry)` - Extracts the data fork
-- `GetResourceFork(ShrinkItArchiveEntry)` - Extracts the resource fork
-- `GetDiskImage(ShrinkItArchiveEntry)` - Extracts the disk image
+- `GetDataFork(ShrinkItArchiveEntry)` - Extracts the data fork as a byte array
+- `GetResourceFork(ShrinkItArchiveEntry)` - Extracts the resource fork as a byte array
+- `GetDiskImage(ShrinkItArchiveEntry)` - Extracts the disk image as a byte array
+- `ExtractDataForkTo(ShrinkItArchiveEntry, Stream)` - Extracts the data fork directly to a stream
+- `ExtractResourceForkTo(ShrinkItArchiveEntry, Stream)` - Extracts the resource fork directly to a stream
+- `ExtractDiskImageTo(ShrinkItArchiveEntry, Stream)` - Extracts the disk image directly to a stream
 
 ### ShrinkItMasterHeaderBlock
 
@@ -243,6 +263,36 @@ GS/OS extended attributes:
 - `Standard1`, `Standard2`, `Standard3` - Standard file types
 - `GSOSForkedFile` - GS/OS extended file
 - `Subdirectory` - Directory entry
+
+## Performance
+
+The library is optimized for minimal allocations and maximum throughput. Two API paths are available:
+
+- **Memory path** (`ReadOnlyMemory<byte>` constructor) - Fastest. Parses headers via span slicing and decompresses directly from memory without intermediate buffer allocations.
+- **Stream path** (`Stream` constructor) - Flexible. Works with any seekable stream source.
+
+### Benchmarks
+
+Measured on Apple M4, .NET 9.0, using [BenchmarkDotNet](https://benchmarkdotnet.org):
+
+| Method | Mean | Allocated |
+|--------|------|-----------|
+| Parse headers (small, memory) | 148 ns | 784 B |
+| Parse headers (small, stream) | 197 ns | 848 B |
+| Parse headers (large, memory) | 1,009 ns | 5,424 B |
+| Parse headers (large, stream) | 1,494 ns | 5,488 B |
+| Extract all data forks (small, LZW/1, memory) | 94 us | 16,481 B |
+| Extract all data forks (small, LZW/1, stream) | 94 us | 16,673 B |
+| Extract all data forks (medium, LZW/2, memory) | 69 us | 26,569 B |
+| Extract all data forks (medium, LZW/2, stream) | 66 us | 26,825 B |
+| Extract all data forks (large, memory) | 1,469 us | 240,833 B |
+| Extract all data forks (large, stream) | 1,647 us | 242,305 B |
+
+Run benchmarks locally:
+
+```sh
+dotnet run --project benchmarks/ShrinkItReader.Benchmarks.csproj -c Release
+```
 
 ## Building
 

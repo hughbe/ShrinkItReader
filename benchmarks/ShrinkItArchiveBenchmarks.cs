@@ -29,29 +29,60 @@ public class ShrinkItArchiveBenchmarks
         _largeArchiveData = File.ReadAllBytes(LargeArchivePath);
     }
 
-    [Benchmark(Description = "Parse archive headers (small)")]
-    public ShrinkItArchive ParseHeaders_Small()
+    // --- Header parsing: Stream path ---
+
+    [Benchmark(Description = "Parse headers (small, stream)")]
+    [BenchmarkCategory("Headers", "Stream")]
+    public ShrinkItArchive ParseHeaders_Small_Stream()
     {
         using var stream = new MemoryStream(_smallArchiveData);
         return new ShrinkItArchive(stream);
     }
 
-    [Benchmark(Description = "Parse archive headers (medium)")]
-    public ShrinkItArchive ParseHeaders_Medium()
+    [Benchmark(Description = "Parse headers (medium, stream)")]
+    [BenchmarkCategory("Headers", "Stream")]
+    public ShrinkItArchive ParseHeaders_Medium_Stream()
     {
         using var stream = new MemoryStream(_mediumArchiveData);
         return new ShrinkItArchive(stream);
     }
 
-    [Benchmark(Description = "Parse archive headers (large)")]
-    public ShrinkItArchive ParseHeaders_Large()
+    [Benchmark(Description = "Parse headers (large, stream)")]
+    [BenchmarkCategory("Headers", "Stream")]
+    public ShrinkItArchive ParseHeaders_Large_Stream()
     {
         using var stream = new MemoryStream(_largeArchiveData);
         return new ShrinkItArchive(stream);
     }
 
-    [Benchmark(Description = "Extract all data forks (small, LZW/1)")]
-    public long ExtractAllDataForks_Small()
+    // --- Header parsing: Memory path ---
+
+    [Benchmark(Description = "Parse headers (small, memory)")]
+    [BenchmarkCategory("Headers", "Memory")]
+    public ShrinkItArchive ParseHeaders_Small_Memory()
+    {
+        return new ShrinkItArchive((ReadOnlyMemory<byte>)_smallArchiveData);
+    }
+
+    [Benchmark(Description = "Parse headers (medium, memory)")]
+    [BenchmarkCategory("Headers", "Memory")]
+    public ShrinkItArchive ParseHeaders_Medium_Memory()
+    {
+        return new ShrinkItArchive((ReadOnlyMemory<byte>)_mediumArchiveData);
+    }
+
+    [Benchmark(Description = "Parse headers (large, memory)")]
+    [BenchmarkCategory("Headers", "Memory")]
+    public ShrinkItArchive ParseHeaders_Large_Memory()
+    {
+        return new ShrinkItArchive((ReadOnlyMemory<byte>)_largeArchiveData);
+    }
+
+    // --- Extraction: Stream path (GetDataFork) ---
+
+    [Benchmark(Description = "Extract all data forks (small, LZW/1, stream)")]
+    [BenchmarkCategory("Extract", "Stream")]
+    public long ExtractAllDataForks_Small_Stream()
     {
         using var stream = new MemoryStream(_smallArchiveData);
         var archive = new ShrinkItArchive(stream);
@@ -65,8 +96,9 @@ public class ShrinkItArchiveBenchmarks
         return totalBytes;
     }
 
-    [Benchmark(Description = "Extract all data forks (medium, LZW/2)")]
-    public long ExtractAllDataForks_Medium()
+    [Benchmark(Description = "Extract all data forks (medium, LZW/2, stream)")]
+    [BenchmarkCategory("Extract", "Stream")]
+    public long ExtractAllDataForks_Medium_Stream()
     {
         using var stream = new MemoryStream(_mediumArchiveData);
         var archive = new ShrinkItArchive(stream);
@@ -80,11 +112,59 @@ public class ShrinkItArchiveBenchmarks
         return totalBytes;
     }
 
-    [Benchmark(Description = "Extract all data forks (large)")]
-    public long ExtractAllDataForks_Large()
+    [Benchmark(Description = "Extract all data forks (large, stream)")]
+    [BenchmarkCategory("Extract", "Stream")]
+    public long ExtractAllDataForks_Large_Stream()
     {
         using var stream = new MemoryStream(_largeArchiveData);
         var archive = new ShrinkItArchive(stream);
+        long totalBytes = 0;
+        foreach (var entry in archive.Entries)
+        {
+            var data = archive.GetDataFork(entry);
+            if (data != null)
+                totalBytes += data.Length;
+        }
+        return totalBytes;
+    }
+
+    // --- Extraction: Memory path (GetDataFork) ---
+
+    [Benchmark(Description = "Extract all data forks (small, LZW/1, memory)")]
+    [BenchmarkCategory("Extract", "Memory")]
+    public long ExtractAllDataForks_Small_Memory()
+    {
+        var archive = new ShrinkItArchive((ReadOnlyMemory<byte>)_smallArchiveData);
+        long totalBytes = 0;
+        foreach (var entry in archive.Entries)
+        {
+            var data = archive.GetDataFork(entry);
+            if (data != null)
+                totalBytes += data.Length;
+        }
+        return totalBytes;
+    }
+
+    [Benchmark(Description = "Extract all data forks (medium, LZW/2, memory)")]
+    [BenchmarkCategory("Extract", "Memory")]
+    public long ExtractAllDataForks_Medium_Memory()
+    {
+        var archive = new ShrinkItArchive((ReadOnlyMemory<byte>)_mediumArchiveData);
+        long totalBytes = 0;
+        foreach (var entry in archive.Entries)
+        {
+            var data = archive.GetDataFork(entry);
+            if (data != null)
+                totalBytes += data.Length;
+        }
+        return totalBytes;
+    }
+
+    [Benchmark(Description = "Extract all data forks (large, memory)")]
+    [BenchmarkCategory("Extract", "Memory")]
+    public long ExtractAllDataForks_Large_Memory()
+    {
+        var archive = new ShrinkItArchive((ReadOnlyMemory<byte>)_largeArchiveData);
         long totalBytes = 0;
         foreach (var entry in archive.Entries)
         {
